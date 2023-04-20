@@ -17,9 +17,13 @@ package spec
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
-
 	"github.com/go-openapi/swag"
+	pinyin "github.com/mozillazg/go-pinyin"
+	orderJson "github.com/virtuald/go-ordered-json"
+	"log"
+	"sort"
+	"strings"
+	"unicode"
 )
 
 // Paths holds the relative paths to the individual endpoints.
@@ -30,7 +34,13 @@ import (
 // For more information: http://goo.gl/8us55a#pathsObject
 type Paths struct {
 	VendorExtensible
-	Paths map[string]PathItem `json:"-"` // custom serializer to flatten this, each entry must start with "/"
+	Paths         map[string]PathItem     `json:"-"` // custom serializer to flatten this, each entry must start with "/"
+	OrderTagPaths orderJson.OrderedObject `json:"-"`
+}
+
+type TagPath struct {
+	Tag  string `json:"tag"`
+	Path string `json:"path"`
 }
 
 // JSONLookup look up a value by the json property name
@@ -82,16 +92,81 @@ func (p Paths) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
+	orderPths := make(orderJson.OrderedObject, 0)
+	if p.OrderTagPaths != nil {
+		p.sortByOrderTagPaths()
+		for _, item := range p.OrderTagPaths {
+			var tagPath TagPath
+			err := json.Unmarshal([]byte(item.Key), &tagPath)
+			if err != nil {
+				return nil, err
+			}
+			if strings.HasPrefix(tagPath.Path, "/") {
+				orderPths = append(orderPths, orderJson.Member{Key: tagPath.Path, Value: item.Value})
+			}
+		}
+	}
+
 	pths := make(map[string]PathItem)
 	for k, v := range p.Paths {
 		if strings.HasPrefix(k, "/") {
 			pths[k] = v
 		}
 	}
-	b2, err := json.Marshal(pths)
-	if err != nil {
-		return nil, err
+
+	var b2 []byte
+	if len(orderPths) == len(pths) {
+		b2, err = orderJson.Marshal(orderPths)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		b2, err = json.Marshal(pths)
+		if err != nil {
+			return nil, err
+		}
 	}
+
 	concated := swag.ConcatJSON(b1, b2)
 	return concated, nil
+}
+
+func (p Paths) sortByOrderTagPaths() {
+	sort.Slice(p.OrderTagPaths, func(i, j int) bool {
+		var tagPathI, tagPathJ TagPath
+		err := json.Unmarshal([]byte(p.OrderTagPaths[i].Key), &tagPathI)
+		if err != nil {
+			log.Printf("orderTagPaths[i].Key unmarshal error: %s", err.Error())
+			return false
+		}
+		err = json.Unmarshal([]byte(p.OrderTagPaths[j].Key), &tagPathJ)
+		if err != nil {
+			log.Printf("orderTagPaths[i].Key unmarshal error: %s", err.Error())
+			return false
+		}
+		if tagPathI.Tag != "" && tagPathJ.Tag != "" {
+			tagI := replaceFirstChar2Pin(tagPathI.Tag)
+			tagJ := replaceFirstChar2Pin(tagPathJ.Tag)
+			return strings.Compare(tagI, tagJ) < 0
+		} else {
+			return strings.Compare(tagPathI.Path, tagPathJ.Path) < 0
+		}
+	})
+}
+
+func replaceFirstChar2Pin(str string) string {
+	pin := pinyin.NewArgs()
+	chars := []rune(str)
+	if len(chars) == 0 {
+		return str
+	}
+	if unicode.Is(unicode.Han, chars[0]) {
+		cp := pinyin.Pinyin(str, pin)
+		if len(cp) > 0 {
+			if len(cp[0]) > 0 {
+				str = strings.Replace(str, string(chars[0]), cp[0][0], 1)
+			}
+		}
+	}
+	return str
 }
